@@ -2265,7 +2265,9 @@ class VariableBuilder:
                 return self.wrap_symint(value, dynamism=DimDynamic.UNBACKED)
 
             # Check for user-provided IntSpec from shapes_spec.
-            int_spec = lookup_spec_from_dynamo_source(self.source, config._shapes_spec)
+            int_spec = lookup_spec_from_dynamo_source(
+                self.source, config._shapes_spec, example_value=value
+            )
             if isinstance(int_spec, IntSpec):
                 if int_spec._type is IntSpecType.STATIC:
                     self.install_guards(GuardBuilder.CONSTANT_MATCH)
@@ -2417,7 +2419,10 @@ class VariableBuilder:
         # (e.g. ``IntSpec`` on a tensor) still bypasses the fast path
         # rather than being silently ignored.
         _has_spec = (
-            lookup_spec_from_dynamo_source(source, config._shapes_spec) is not None
+            lookup_spec_from_dynamo_source(
+                source, config._shapes_spec, example_value=value
+            )
+            is not None
         )
 
         if (
@@ -3948,7 +3953,9 @@ def _automatic_dynamic(
     # bypass condition checks for *any* spec so a mis-typed user spec
     # still opts out of the fast path instead of being silently
     # specialized.
-    _spec_lookup = lookup_spec_from_dynamo_source(source, config._shapes_spec)
+    _spec_lookup = lookup_spec_from_dynamo_source(
+        source, config._shapes_spec, example_value=e
+    )
     tensor_spec = _spec_lookup if isinstance(_spec_lookup, TensorSpec) else None
 
     if (
