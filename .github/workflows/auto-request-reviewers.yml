@@ -1,0 +1,219 @@
+# File-path-based reviewer auto-assignment using merge_rules.yaml.
+# This complements (not replaces) auto_request_review.yml, which does
+# author-based routing via necojackarc/auto-request-review. That workflow
+# assigns reviewers based on who authored the PR; this one assigns domain
+# owners based on which files the PR touches.
+#
+# Triggered on a 12h cron (and manually via workflow_dispatch). We do not use
+# pull_request_target — it requires "Approve and run" for first-time external
+# contributors, which is exactly the population this workflow is meant to
+# triage. The cron sweep finds eligible PRs via the GitHub Search API and
+# routes them in bulk, no approval gate.
+name: Auto Request Reviewers
+
+on:
+  schedule:
+    - cron: "0 */12 * * *"
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "Optional: PR number or URL to triage. Empty = sweep all eligible PRs."
+        type: string
+        required: false
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  # Read-only compute: discover eligible PRs, fetch files, run the matcher
+  # over attacker-controlled filenames. Cannot write to PRs even if compromised.
+  compute:
+    if: github.repository == 'pytorch/pytorch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      results: ${{ steps.match.outputs.results }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            .github/merge_rules.yaml
+            .github/scripts/gitutils.py
+            .github/scripts/match_reviewers.py
+
+      - name: Discover eligible PRs and fetch files
+        id: discover
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        env:
+          PR_INPUT: ${{ inputs.pr }}
+        with:
+          script: |
+            // Resolve a single PR number from a workflow_dispatch input.
+            // Returns null if no input was provided (sweep mode).
+            function resolveInputPr(input) {
+              if (!input) return null;
+              if (/^\d+$/.test(input)) return parseInt(input);
+              const m = input.match(/^https?:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)$/);
+              if (!m) {
+                core.setFailed('Invalid input. Expected a PR number or URL.');
+                return null;
+              }
+              if (m[1] !== 'pytorch/pytorch') {
+                core.setFailed(`URL must be for pytorch/pytorch, got ${m[1]}`);
+                return null;
+              }
+              return parseInt(m[2]);
+            }
+
+            // Eligibility check applied to a fully-fetched PR object. Mirrors
+            // the search query qualifiers as defense in depth (especially for
+            // the workflow_dispatch single-PR path which doesn't go through
+            // search), and adds the "no pending review request" check that
+            // Search has no qualifier for.
+            function isEligible(pr) {
+              const labels = pr.labels.map(l => l.name);
+              const reasons = [];
+              if (pr.state !== 'open') reasons.push(`state=${pr.state}`);
+              if (pr.draft) reasons.push('draft');
+              if (pr.base.ref !== 'main') reasons.push(`base=${pr.base.ref}`);
+              if (new Date(pr.created_at) < new Date('2019-06-06')) reasons.push('created before 2019-06-06');
+              if (!labels.includes('open source')) reasons.push('no "open source" label');
+              if (labels.includes('triaged')) reasons.push('has "triaged" label');
+              if ((pr.requested_reviewers || []).length > 0) reasons.push('reviewers already requested');
+              if ((pr.requested_teams || []).length > 0) reasons.push('team reviewers already requested');
+              if (reasons.length) {
+                core.info(`Skip PR #${pr.number}: ${reasons.join(', ')}`);
+                return false;
+              }
+              return true;
+            }
+
+            const inputPr = resolveInputPr(process.env.PR_INPUT);
+            let candidateNumbers;
+
+            if (inputPr) {
+              candidateNumbers = [inputPr];
+              core.info(`Single-PR mode: #${inputPr}`);
+            } else {
+              // Sweep mode: search for plausibly-eligible PRs.
+              const q = [
+                'repo:pytorch/pytorch',
+                'is:pr',
+                'is:open',
+                'base:main',
+                'draft:false',
+                'label:"open source"',
+                '-label:triaged',
+                'created:>=2019-06-06',
+                '-review:approved',
+                '-review:changes_requested',
+              ].join(' ');
+              core.info(`Sweep query: ${q}`);
+              const items = await github.paginate(github.rest.search.issuesAndPullRequests, {
+                q,
+                sort: 'updated',
+                order: 'desc',
+                per_page: 100,
+              });
+              const all = items.map(i => i.number);
+              const MAX_CANDIDATES = 200;
+              candidateNumbers = all.slice(0, MAX_CANDIDATES);
+              core.info(`Search returned ${all.length} candidates; processing ${candidateNumbers.length}`);
+            }
+
+            // Fetch each candidate to apply the (b) check + collect files.
+            // Per-PR try/catch keeps one transient failure from killing the sweep.
+            const batch = [];
+            for (const number of candidateNumbers) {
+              try {
+                const {data: pr} = await github.rest.pulls.get({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: number,
+                });
+                if (!isEligible(pr)) continue;
+                const files = await github.paginate(github.rest.pulls.listFiles, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: number,
+                  per_page: 100,
+                }, (resp) => resp.data.map(f => f.filename));
+                batch.push({number, author: pr.user.login, files});
+                core.info(`Eligible: PR #${number} by ${pr.user.login} (${files.length} files)`);
+              } catch (error) {
+                core.warning(`Skip PR #${number}: ${error.message}`);
+              }
+            }
+
+            const fs = require('fs');
+            fs.writeFileSync('batch.json', JSON.stringify(batch));
+            core.info(`Eligible PRs: ${batch.length}`);
+
+      - name: Install PyYAML
+        run: pip install pyyaml==6.0.2
+
+      - name: Run matcher over batch
+        id: match
+        run: |
+          RESULTS="$(python3 .github/scripts/match_reviewers.py \
+            --merge-rules .github/merge_rules.yaml \
+            --batch-file batch.json)"
+          echo "results=$RESULTS" >> "$GITHUB_OUTPUT"
+
+  # Write-only requester: no checkout, only consumes the JSON output from compute.
+  request:
+    needs: compute
+    if: needs.compute.outputs.results != '' && needs.compute.outputs.results != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: none
+      pull-requests: write
+    steps:
+      - name: Request reviews
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        env:
+          RESULTS: ${{ needs.compute.outputs.results }}
+        with:
+          script: |
+            const results = JSON.parse(process.env.RESULTS);
+            for (const {number, reviewers, teams} of results) {
+              if (reviewers.length === 0 && teams.length === 0) {
+                core.info(`PR #${number}: no matching reviewers, skipping.`);
+                continue;
+              }
+              // Request reviews individually so a single stale username doesn't
+              // prevent all other valid reviewers from being assigned.
+              for (const reviewer of reviewers) {
+                try {
+                  await github.rest.pulls.requestReviewers({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    pull_number: number,
+                    reviewers: [reviewer],
+                  });
+                  core.info(`PR #${number}: requested review from ${reviewer}`);
+                } catch (error) {
+                  core.warning(`PR #${number}: failed to request ${reviewer}: ${error.message}`);
+                }
+              }
+              for (const team of teams) {
+                try {
+                  await github.rest.pulls.requestReviewers({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    pull_number: number,
+                    team_reviewers: [team],
+                  });
+                  core.info(`PR #${number}: requested review from team pytorch/${team}`);
+                } catch (error) {
+                  core.warning(`PR #${number}: failed to request team pytorch/${team}: ${error.message}`);
+                }
+              }
+            }
