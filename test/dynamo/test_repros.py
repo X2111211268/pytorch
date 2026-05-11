@@ -8149,9 +8149,6 @@ SavedForBackwardsAOTOutput(idx=5)""",
         self.assertEqual(compiled_zero.shape, torch.Size([2, 3]))
 
     def test_basic_tensor_subclass_constructor(self):
-        # Tests that basic Tensor subclass construction works with torch.compile
-        # Regression test for LazyVariableTracker not being realized before
-        # accessing __dict__ in TensorWithTFOverrideVariable.from_tensor_var
         class MyTensor(torch.Tensor):
             pass
 
