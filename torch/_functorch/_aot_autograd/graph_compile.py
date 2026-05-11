@@ -2751,19 +2751,19 @@ def _aot_stage2b_compile_forward_or_inference(
             runtime_metadata=fw_metadata,
         )
 
+        complex_wrapper = ComplexWrapper()
+        compiled_fw_func = complex_wrapper.post_compile(
+            compiled_fw_func,
+            aot_config,
+            runtime_metadata=fw_metadata,
+        )
+
         compiled_fw_func = AOTDispatchSubclassWrapper(
             fw_only=None,
             trace_joint=False,
             maybe_subclass_meta=maybe_subclass_meta,
             num_fw_outs_saved_for_bw=num_fw_outs_saved_for_bw,
         ).post_compile(
-            compiled_fw_func,
-            aot_config,
-            runtime_metadata=fw_metadata,
-        )
-
-        complex_wrapper = ComplexWrapper()
-        compiled_fw_func = complex_wrapper.post_compile(
             compiled_fw_func,
             aot_config,
             runtime_metadata=fw_metadata,

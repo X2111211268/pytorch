@@ -188,6 +188,8 @@ def run_functionalized_fw_and_collect_metadata(
 
     @simple_wraps(f)
     def inner(*flat_args: Any) -> ViewAndMutationMeta:
+        from .. import config
+
         # This function is meant to be run with the forward, which expects a flat list of tensor/symint/other args.
         if not all(
             isinstance(a, tuple(KNOWN_TYPES)) or is_opaque_type(type(a))
@@ -218,6 +220,13 @@ def run_functionalized_fw_and_collect_metadata(
             flat_f_args = pytree.tree_map(_to_fun, flat_args)
             flat_f_args_descs = flat_args_descs
             flat_f_outs = f(*flat_f_args)
+
+            if config.enable_complex_wrapper:
+                complex_tensor_indices = tuple(
+                    i for i, t in enumerate(flat_f_args) if t.dtype.is_complex
+                )
+            else:
+                complex_tensor_indices = None
 
             # Assert that f does NOT have an AOTOutputs in it, easy mistake to
             # make!  You need to drop the second output before calling this
@@ -877,6 +886,7 @@ from a multi-output view call"
             grad_enabled_mutation=grad_enabled_mutation,
             static_input_indices=static_input_indices,
             tokens=mode._tokens,
+            complex_tensor_indices=complex_tensor_indices,
         )
         return metadata
 
