@@ -1603,6 +1603,42 @@ class TestNbAdd(torch._dynamo.test_case.TestCase):
         result = obj_not_impl + obj_impl
         self.assertEqual(result, "_BaseWithAdd.__radd__")
 
+    def test_add_float_and_symnode(self):
+        def fn(x):
+            s = x.shape[0]
+            a = 2.5 + s
+            b = s + 1.25
+            return x + a + b
+
+        x = torch.randn(4)
+        torch._dynamo.mark_dynamic(x, 0)
+        opt_fn = torch.compile(fn, backend="eager", fullgraph=True)
+        self.assertEqual(opt_fn(x), fn(x))
+
+    def test_add_int_and_symnode(self):
+        def fn(x):
+            s = x.shape[0]
+            a = 3 + s
+            b = s + 7
+            return x + a + b
+
+        x = torch.randn(4)
+        torch._dynamo.mark_dynamic(x, 0)
+        opt_fn = torch.compile(fn, backend="eager", fullgraph=True)
+        self.assertEqual(opt_fn(x), fn(x))
+
+    def test_add_bool_and_symnode(self):
+        def fn(x):
+            s = x.shape[0]
+            a = True + s
+            b = s + False
+            return x + a + b
+
+        x = torch.randn(4)
+        torch._dynamo.mark_dynamic(x, 0)
+        opt_fn = torch.compile(fn, backend="eager", fullgraph=True)
+        self.assertEqual(opt_fn(x), fn(x))
+
 
 instantiate_parametrized_tests(TestNbOr)
 instantiate_parametrized_tests(TestNbSub)
