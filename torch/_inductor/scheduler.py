@@ -861,6 +861,8 @@ class NestedReduction:
         )
         if grouped_axis is None:
             return False
+        if grouped_axis is cls.GroupedAxis.X:
+            return False
         group_size_int = int(group_size)
         if not (1 <= group_size_int and is_power_of_2(group_size_int)):
             return False
